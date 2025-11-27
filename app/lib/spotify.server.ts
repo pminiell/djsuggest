@@ -1,12 +1,17 @@
 // Spotify API integration module
 
-const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || "";
-const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET || "";
-const SPOTIFY_REFRESH_TOKEN = process.env.SPOTIFY_REFRESH_TOKEN || "";
-const SPOTIFY_PLAYLIST_ID = process.env.SPOTIFY_PLAYLIST_ID || "";
-
 const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
 const API_BASE = "https://api.spotify.com/v1";
+
+// Read env vars lazily to ensure .env is loaded
+function getConfig() {
+  return {
+    clientId: process.env.SPOTIFY_CLIENT_ID || "",
+    clientSecret: process.env.SPOTIFY_CLIENT_SECRET || "",
+    refreshToken: process.env.SPOTIFY_REFRESH_TOKEN || "",
+    playlistId: process.env.SPOTIFY_PLAYLIST_ID || "",
+  };
+}
 
 interface SpotifyTokenResponse {
   access_token: string;
@@ -43,8 +48,9 @@ async function getAccessToken(): Promise<string> {
     return cachedToken;
   }
 
+  const config = getConfig();
   const basic = Buffer.from(
-    `${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`
+    `${config.clientId}:${config.clientSecret}`
   ).toString("base64");
 
   const response = await fetch(TOKEN_ENDPOINT, {
@@ -55,7 +61,7 @@ async function getAccessToken(): Promise<string> {
     },
     body: new URLSearchParams({
       grant_type: "refresh_token",
-      refresh_token: SPOTIFY_REFRESH_TOKEN,
+      refresh_token: config.refreshToken,
     }),
   });
 
@@ -114,9 +120,10 @@ export async function searchTracks(query: string, limit: number = 10) {
 // Add a track to the configured playlist
 export async function addTrackToPlaylist(trackId: string) {
   const token = await getAccessToken();
+  const config = getConfig();
 
   const response = await fetch(
-    `${API_BASE}/playlists/${SPOTIFY_PLAYLIST_ID}/tracks`,
+    `${API_BASE}/playlists/${config.playlistId}/tracks`,
     {
       method: "POST",
       headers: {
@@ -139,10 +146,11 @@ export async function addTrackToPlaylist(trackId: string) {
 
 // Check if Spotify is configured
 export function isSpotifyConfigured(): boolean {
+  const config = getConfig();
   return !!(
-    SPOTIFY_CLIENT_ID &&
-    SPOTIFY_CLIENT_SECRET &&
-    SPOTIFY_REFRESH_TOKEN &&
-    SPOTIFY_PLAYLIST_ID
+    config.clientId &&
+    config.clientSecret &&
+    config.refreshToken &&
+    config.playlistId
   );
 }

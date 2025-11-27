@@ -3,6 +3,7 @@ import { getSuggestions, hasVoted, VOTE_THRESHOLD } from "~/lib/db.server";
 import { ensureVoterToken } from "~/lib/session.server";
 import { isSpotifyConfigured } from "~/lib/spotify.server";
 import { useEffect, useState, useRef } from "react";
+import { useFetcher } from "react-router";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -58,10 +59,13 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>(data.suggestions);
   const [votedMap, setVotedMap] = useState<Record<string, boolean>>(data.votedMap);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Use React Router's fetcher for search
+  const searchFetcher = useFetcher<{ tracks: any[] }>();
+  const searchResults = searchFetcher.data?.tracks || [];
+  const isSearching = searchFetcher.state === "loading";
 
   // SSE connection for live updates
   useEffect(() => {
@@ -110,27 +114,18 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     }
   }, [notification]);
 
-  // Debounced search
+  // Debounced search using fetcher
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
 
     if (searchQuery.trim().length < 2) {
-      setSearchResults([]);
       return;
     }
 
-    searchTimeoutRef.current = setTimeout(async () => {
-      setIsSearching(true);
-      try {
-        const res = await fetch(`/search?q=${encodeURIComponent(searchQuery)}`);
-        const data = await res.json();
-        setSearchResults(data.tracks || []);
-      } catch (error) {
-        console.error("Search error:", error);
-      }
-      setIsSearching(false);
+    searchTimeoutRef.current = setTimeout(() => {
+      searchFetcher.load(`/search?q=${encodeURIComponent(searchQuery)}`);
     }, 300);
 
     return () => {
@@ -154,7 +149,6 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       const data = await res.json();
       if (data.created) {
         setSearchQuery("");
-        setSearchResults([]);
         setNotification(`Suggested: ${track.name}`);
       } else {
         setNotification(`"${track.name}" was already suggested`);

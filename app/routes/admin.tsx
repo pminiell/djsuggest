@@ -1,5 +1,6 @@
 import type { Route } from "./+types/admin";
 import { useState } from "react";
+import { Form } from "react-router";
 import { getSuggestions, deleteSuggestion, VOTE_THRESHOLD } from "~/lib/db.server";
 
 const ADMIN_PIN = process.env.ADMIN_PIN || "1234";
@@ -62,7 +63,6 @@ export default function Admin({ loaderData }: Route.ComponentProps) {
   const [error, setError] = useState<string | null>(null);
 
   async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
     const res = await fetch(`/admin?pin=${encodeURIComponent(pin)}`);
     const data = await res.json();
     if (data.authorized) {
@@ -98,7 +98,7 @@ export default function Admin({ loaderData }: Route.ComponentProps) {
       <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
         <div className="bg-gray-800 p-8 rounded-xl max-w-md w-full">
           <h1 className="text-2xl font-bold mb-6 text-center">Admin Login</h1>
-          <form onSubmit={handleLogin}>
+          <Form onSubmit={handleLogin}>
             <input
               type="password"
               value={pin}
@@ -113,7 +113,7 @@ export default function Admin({ loaderData }: Route.ComponentProps) {
             >
               Login
             </button>
-          </form>
+          </Form>
         </div>
       </div>
     );

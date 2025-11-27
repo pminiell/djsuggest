@@ -5,7 +5,10 @@ export async function loader({ request }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const query = url.searchParams.get("q") || "";
 
+  console.log("Search request:", { query, configured: isSpotifyConfigured() });
+
   if (!isSpotifyConfigured()) {
+    console.log("Spotify not configured");
     return Response.json({
       tracks: [],
       error: "Spotify not configured",
@@ -17,7 +20,9 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
 
   try {
+    console.log("Searching Spotify for:", query);
     const tracks = await searchTracks(query);
+    console.log("Found tracks:", tracks.length);
     return Response.json({ tracks });
   } catch (error) {
     console.error("Search error:", error);
