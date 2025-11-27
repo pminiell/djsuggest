@@ -1,5 +1,5 @@
 import type { Route } from "./+types/suggest";
-import { createSuggestion } from "~/lib/db.server";
+import { createSuggestion, addVote } from "~/lib/db.server";
 import { ensureVoterToken } from "~/lib/session.server";
 import { broadcastNewSuggestion } from "~/lib/events.server";
 
@@ -28,11 +28,16 @@ export async function action({ request }: Route.ActionArgs) {
     });
 
     if (created) {
+      // Auto-vote for the suggester
+      await addVote(suggestion.id, token);
+      // Update the suggestion object with the new vote count
+      suggestion.votes = 1;
+      
       // Broadcast to all connected clients
       broadcastNewSuggestion(suggestion);
     }
 
-    return Response.json({ suggestion, created }, { headers });
+    return Response.json({ suggestion, created, autoVoted: created }, { headers });
   } catch (error) {
     console.error("Suggest error:", error);
     return Response.json(

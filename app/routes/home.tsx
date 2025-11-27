@@ -59,12 +59,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>(data.suggestions);
   const [votedMap, setVotedMap] = useState<Record<string, boolean>>(data.votedMap);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showSearchResults, setShowSearchResults] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Use React Router's fetcher for search
   const searchFetcher = useFetcher<{ tracks: any[] }>();
-  const searchResults = searchFetcher.data?.tracks || [];
   const isSearching = searchFetcher.state === "loading";
 
   // SSE connection for live updates
@@ -72,18 +72,24 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     const eventSource = new EventSource("/events");
 
     eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      const eventData = JSON.parse(event.data);
 
-      switch (data.type) {
+      switch (eventData.type) {
         case "new-suggestion":
-          setSuggestions((prev) => [data.data, ...prev]);
-          setNotification(`New suggestion: ${data.data.title}`);
+          // Only add if not already in the list (prevents duplicates from own suggestions)
+          setSuggestions((prev) => {
+            if (prev.some((s) => s.id === eventData.data.id)) {
+              return prev;
+            }
+            return [eventData.data, ...prev];
+          });
           break;
         case "new-vote":
+          // Only update if the server vote count is higher (handles race conditions)
           setSuggestions((prev) =>
             prev.map((s) =>
-              s.id === data.data.suggestionId
-                ? { ...s, votes: data.data.votes }
+              s.id === eventData.data.suggestionId && eventData.data.votes > s.votes
+                ? { ...s, votes: eventData.data.votes }
                 : s
             )
           );
@@ -91,10 +97,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         case "added-to-playlist":
           setSuggestions((prev) =>
             prev.map((s) =>
-              s.id === data.data.id ? { ...s, addedToPlaylist: true } : s
+              s.id === eventData.data.id ? { ...s, addedToPlaylist: true } : s
             )
           );
-          setNotification(`🎉 "${data.data.title}" added to playlist!`);
+          setNotification(`🎉 "${eventData.data.title}" added to playlist!`);
           break;
       }
     };
@@ -124,6 +130,9 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       return;
     }
 
+    // Re-enable showing results when user types
+    setShowSearchResults(true);
+
     searchTimeoutRef.current = setTimeout(() => {
       searchFetcher.load(`/search?q=${encodeURIComponent(searchQuery)}`);
     }, 300);
@@ -135,7 +144,16 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     };
   }, [searchQuery]);
 
+  // Show search results only when query is long enough and not hidden
+  const searchResults = (searchQuery.trim().length >= 2 && showSearchResults)
+    ? (searchFetcher.data?.tracks || []) 
+    : [];
+
   async function handleSuggest(track: any) {
+    // Immediately hide search results and clear input for better feedback
+    setShowSearchResults(false);
+    setSearchQuery("");
+    
     try {
       const res = await fetch("/suggest", {
         method: "POST",
@@ -148,7 +166,9 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       });
       const data = await res.json();
       if (data.created) {
-        setSearchQuery("");
+        // Add the suggestion to the list and mark as voted (auto-vote on backend)
+        setSuggestions((prev) => [data.suggestion, ...prev]);
+        setVotedMap((prev) => ({ ...prev, [data.suggestion.id]: true }));
         setNotification(`Suggested: ${track.name}`);
       } else {
         setNotification(`"${track.name}" was already suggested`);
@@ -161,6 +181,14 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   async function handleVote(suggestionId: string) {
     if (votedMap[suggestionId]) return;
 
+    // Optimistically update UI
+    setVotedMap((prev) => ({ ...prev, [suggestionId]: true }));
+    setSuggestions((prev) =>
+      prev.map((s) =>
+        s.id === suggestionId ? { ...s, votes: s.votes + 1 } : s
+      )
+    );
+
     try {
       const res = await fetch("/vote", {
         method: "POST",
@@ -168,11 +196,25 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         body: JSON.stringify({ suggestionId }),
       });
       const data = await res.json();
-      if (data.success) {
-        setVotedMap((prev) => ({ ...prev, [suggestionId]: true }));
+      if (!data.success) {
+        // Revert optimistic update on failure
+        setVotedMap((prev) => ({ ...prev, [suggestionId]: false }));
+        setSuggestions((prev) =>
+          prev.map((s) =>
+            s.id === suggestionId ? { ...s, votes: s.votes - 1 } : s
+          )
+        );
+        setNotification(data.error || "Vote failed");
       }
     } catch (error) {
       console.error("Vote error:", error);
+      // Revert optimistic update on error
+      setVotedMap((prev) => ({ ...prev, [suggestionId]: false }));
+      setSuggestions((prev) =>
+        prev.map((s) =>
+          s.id === suggestionId ? { ...s, votes: s.votes - 1 } : s
+        )
+      );
     }
   }
 
