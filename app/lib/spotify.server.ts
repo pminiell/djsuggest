@@ -29,6 +29,7 @@ interface SpotifyTrack {
   };
   uri: string;
   external_urls: { spotify: string };
+  duration_ms?: number;
 }
 
 interface SpotifySearchResponse {
@@ -153,4 +154,87 @@ export function isSpotifyConfigured(): boolean {
     config.refreshToken &&
     config.playlistId
   );
+}
+
+// Get currently playing track
+export async function getCurrentlyPlaying() {
+  if (!isSpotifyConfigured()) return null;
+
+  try {
+    const token = await getAccessToken();
+
+    const response = await fetch(`${API_BASE}/me/player/currently-playing`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    // 204 means nothing is playing
+    if (response.status === 204) {
+      return null;
+    }
+
+    if (!response.ok) {
+      console.error("Failed to get currently playing:", await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+
+    if (!data.item) return null;
+
+    const track = data.item as SpotifyTrack;
+    return {
+      id: track.id,
+      name: track.name,
+      artist: track.artists.map((a) => a.name).join(", "),
+      album: track.album.name,
+      albumArt: track.album.images[0]?.url || "",
+      isPlaying: data.is_playing,
+      progressMs: data.progress_ms,
+      durationMs: track.duration_ms,
+    };
+  } catch (error) {
+    console.error("Error getting currently playing:", error);
+    return null;
+  }
+}
+
+// Get upcoming tracks from the player queue
+export async function getUpcomingTracks(limit: number = 5) {
+  if (!isSpotifyConfigured()) return [];
+
+  try {
+    const token = await getAccessToken();
+
+    const response = await fetch(`${API_BASE}/me/player/queue`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    // 204 means no active device
+    if (response.status === 204) {
+      return [];
+    }
+
+    if (!response.ok) {
+      console.error("Failed to get queue:", await response.text());
+      return [];
+    }
+
+    const data = await response.json();
+
+    // data.queue contains upcoming tracks
+    return (data.queue || []).slice(0, limit).map((track: SpotifyTrack) => ({
+      id: track.id,
+      name: track.name,
+      artist: track.artists.map((a: { name: string }) => a.name).join(", "),
+      album: track.album.name,
+      albumArt: track.album.images[0]?.url || "",
+    }));
+  } catch (error) {
+    console.error("Error getting queue:", error);
+    return [];
+  }
 }

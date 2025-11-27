@@ -7,4 +7,5 @@ export default [
   route("vote", "routes/vote.tsx"),
   route("events", "routes/events.tsx"),
   route("admin", "routes/admin.tsx"),
+  route("playback", "routes/playback.tsx"),
 ] satisfies RouteConfig;

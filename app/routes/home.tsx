@@ -1,7 +1,7 @@
 import type { Route } from "./+types/home";
 import { getSuggestions, hasVoted, VOTE_THRESHOLD } from "~/lib/db.server";
 import { ensureVoterToken } from "~/lib/session.server";
-import { isSpotifyConfigured } from "~/lib/spotify.server";
+import { isSpotifyConfigured, getCurrentlyPlaying, getUpcomingTracks } from "~/lib/spotify.server";
 import { useEffect, useState, useRef } from "react";
 import { useFetcher } from "react-router";
 
@@ -26,12 +26,20 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const votedMap = Object.fromEntries(votedFor.map((v) => [v.id, v.hasVoted]));
 
+  // Get Spotify playback info
+  const [nowPlaying, upNext] = await Promise.all([
+    getCurrentlyPlaying(),
+    getUpcomingTracks(5),
+  ]);
+
   return Response.json(
     {
       suggestions,
       votedMap,
       voteThreshold: VOTE_THRESHOLD,
       spotifyConfigured: isSpotifyConfigured(),
+      nowPlaying,
+      upNext,
     },
     { headers }
   );
@@ -47,25 +55,88 @@ interface Suggestion {
   createdAt: string;
 }
 
+interface NowPlaying {
+  id: string;
+  name: string;
+  artist: string;
+  album: string;
+  albumArt: string;
+  isPlaying: boolean;
+  progressMs: number;
+  durationMs: number;
+}
+
+interface UpNextTrack {
+  id: string;
+  name: string;
+  artist: string;
+  album: string;
+  albumArt: string;
+}
+
 interface LoaderData {
   suggestions: Suggestion[];
   votedMap: Record<string, boolean>;
   voteThreshold: number;
   spotifyConfigured: boolean;
+  nowPlaying: NowPlaying | null;
+  upNext: UpNextTrack[];
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   const data = loaderData as unknown as LoaderData;
   const [suggestions, setSuggestions] = useState<Suggestion[]>(data.suggestions);
   const [votedMap, setVotedMap] = useState<Record<string, boolean>>(data.votedMap);
+  const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(data.nowPlaying);
+  const [upNext, setUpNext] = useState<UpNextTrack[]>(data.upNext);
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearchResults, setShowSearchResults] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
-  // Use React Router's fetcher for search
+  // Use React Router's fetcher for search and playback refresh
   const searchFetcher = useFetcher<{ tracks: any[] }>();
+  const playbackFetcher = useFetcher<{ nowPlaying: NowPlaying | null; upNext: UpNextTrack[] }>();
+  const suggestFetcher = useFetcher<{ suggestion: Suggestion; created: boolean; autoVoted: boolean }>();
   const isSearching = searchFetcher.state === "loading";
+
+  // Periodically refresh playback info
+  useEffect(() => {
+    const interval = setInterval(() => {
+      playbackFetcher.load("/playback");
+    }, 10000); // Every 10 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Update playback state when fetcher returns data
+  useEffect(() => {
+    if (playbackFetcher.data) {
+      setNowPlaying(playbackFetcher.data.nowPlaying);
+      setUpNext(playbackFetcher.data.upNext);
+    }
+  }, [playbackFetcher.data]);
+
+  // Handle suggestion response
+  useEffect(() => {
+    if (suggestFetcher.data) {
+      const { suggestion, created } = suggestFetcher.data;
+      if (created && suggestion) {
+        // Add the suggestion to the list and mark as voted (auto-vote on backend)
+        setSuggestions((prev) => {
+          // Prevent duplicates (in case SSE already added it)
+          if (prev.some((s) => s.id === suggestion.id)) {
+            return prev;
+          }
+          return [suggestion, ...prev];
+        });
+        setVotedMap((prev) => ({ ...prev, [suggestion.id]: true }));
+        setNotification(`Suggested: ${suggestion.title}`);
+      } else if (suggestion) {
+        setNotification(`"${suggestion.title}" was already suggested`);
+      }
+    }
+  }, [suggestFetcher.data]);
 
   // SSE connection for live updates
   useEffect(() => {
@@ -120,6 +191,9 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     }
   }, [notification]);
 
+  // Track the query that was actually searched for
+  const [searchedQuery, setSearchedQuery] = useState("");
+
   // Debounced search using fetcher
   useEffect(() => {
     if (searchTimeoutRef.current) {
@@ -127,6 +201,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     }
 
     if (searchQuery.trim().length < 2) {
+      setSearchedQuery("");
       return;
     }
 
@@ -134,6 +209,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     setShowSearchResults(true);
 
     searchTimeoutRef.current = setTimeout(() => {
+      setSearchedQuery(searchQuery);
       searchFetcher.load(`/search?q=${encodeURIComponent(searchQuery)}`);
     }, 300);
 
@@ -144,8 +220,17 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     };
   }, [searchQuery]);
 
-  // Show search results only when query is long enough and not hidden
-  const searchResults = (searchQuery.trim().length >= 2 && showSearchResults)
+  // Show search results only when:
+  // - query is long enough
+  // - not hidden
+  // - current query matches the searched query (prevents stale results)
+  // - not currently loading
+  const searchResults = (
+    searchQuery.trim().length >= 2 && 
+    showSearchResults && 
+    searchQuery === searchedQuery &&
+    searchFetcher.state !== "loading"
+  )
     ? (searchFetcher.data?.tracks || []) 
     : [];
 
@@ -153,29 +238,21 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     // Immediately hide search results and clear input for better feedback
     setShowSearchResults(false);
     setSearchQuery("");
+    setSearchedQuery("");
     
-    try {
-      const res = await fetch("/suggest", {
+    // Use fetcher to submit suggestion
+    suggestFetcher.submit(
+      JSON.stringify({
+        spotifyTrackId: track.id,
+        title: track.name,
+        artist: track.artist,
+      }),
+      {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          spotifyTrackId: track.id,
-          title: track.name,
-          artist: track.artist,
-        }),
-      });
-      const data = await res.json();
-      if (data.created) {
-        // Add the suggestion to the list and mark as voted (auto-vote on backend)
-        setSuggestions((prev) => [data.suggestion, ...prev]);
-        setVotedMap((prev) => ({ ...prev, [data.suggestion.id]: true }));
-        setNotification(`Suggested: ${track.name}`);
-      } else {
-        setNotification(`"${track.name}" was already suggested`);
+        action: "/suggest",
+        encType: "application/json",
       }
-    } catch (error) {
-      console.error("Suggest error:", error);
-    }
+    );
   }
 
   async function handleVote(suggestionId: string) {
@@ -229,7 +306,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
       <div className="container mx-auto px-4 py-8 max-w-4xl">
         {/* Header */}
-        <header className="text-center mb-12">
+        <header className="text-center mb-8">
           <h1 className="text-5xl font-bold mb-2 bg-gradient-to-r from-pink-500 to-purple-500 bg-clip-text text-transparent">
             DJ Suggest
           </h1>
@@ -243,8 +320,83 @@ export default function Home({ loaderData }: Route.ComponentProps) {
           )}
         </header>
 
+        {/* Now Playing & Up Next */}
+        {data.spotifyConfigured && (
+          <section className="mb-8 grid md:grid-cols-2 gap-4">
+            {/* Now Playing */}
+            <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                🎵 Now Playing
+              </h2>
+              {nowPlaying ? (
+                <div className="flex items-center gap-4">
+                  {nowPlaying.albumArt && (
+                    <img
+                      src={nowPlaying.albumArt}
+                      alt={nowPlaying.album}
+                      className="w-16 h-16 rounded-lg shadow-lg"
+                    />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold truncate">{nowPlaying.name}</p>
+                    <p className="text-sm text-gray-400 truncate">{nowPlaying.artist}</p>
+                    {nowPlaying.isPlaying && (
+                      <div className="mt-2 h-1 bg-gray-700 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-green-500 transition-all duration-1000"
+                          style={{ 
+                            width: `${(nowPlaying.progressMs / nowPlaying.durationMs) * 100}%` 
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  {nowPlaying.isPlaying && (
+                    <div className="flex gap-1">
+                      <span className="w-1 h-4 bg-green-500 rounded-full animate-pulse" />
+                      <span className="w-1 h-4 bg-green-500 rounded-full animate-pulse delay-75" />
+                      <span className="w-1 h-4 bg-green-500 rounded-full animate-pulse delay-150" />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-sm">Nothing playing right now</p>
+              )}
+            </div>
+
+            {/* Up Next */}
+            <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                📋 Up Next
+              </h2>
+              {upNext.length > 0 ? (
+                <div className="space-y-2">
+                  {upNext.slice(0, 3).map((track, index) => (
+                    <div key={track.id} className="flex items-center gap-3">
+                      <span className="text-xs text-gray-500 w-4">{index + 1}</span>
+                      {track.albumArt && (
+                        <img
+                          src={track.albumArt}
+                          alt={track.album}
+                          className="w-8 h-8 rounded"
+                        />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm truncate">{track.name}</p>
+                        <p className="text-xs text-gray-500 truncate">{track.artist}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-sm">No tracks in queue</p>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* Search Section */}
-        <section className="mb-12">
+        <section className="mb-8">
           <div className="relative">
             <input
               type="text"

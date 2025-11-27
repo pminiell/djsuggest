@@ -1,19 +1,52 @@
 import type { Route } from "./+types/admin";
-import { useState } from "react";
-import { Form } from "react-router";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router";
 import { getSuggestions, deleteSuggestion, VOTE_THRESHOLD } from "~/lib/db.server";
+import { createCookie } from "react-router";
+
+// Cookie to store admin session
+const adminSession = createCookie("admin_session", {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax",
+  maxAge: 60 * 60 * 24, // 24 hours
+});
 
 const ADMIN_PIN = process.env.ADMIN_PIN || "1234";
 
-export async function loader({ request }: Route.LoaderArgs) {
+async function isAuthorized(request: Request): Promise<boolean> {
   const url = new URL(request.url);
-  const pin = url.searchParams.get("pin");
+  const pinFromUrl = url.searchParams.get("pin");
+  
+  // Check URL param first
+  if (pinFromUrl === ADMIN_PIN) {
+    return true;
+  }
+  
+  // Check cookie
+  const cookieHeader = request.headers.get("Cookie");
+  const sessionPin = await adminSession.parse(cookieHeader);
+  return sessionPin === ADMIN_PIN;
+}
 
-  if (pin !== ADMIN_PIN) {
+export async function loader({ request }: Route.LoaderArgs) {
+  const authorized = await isAuthorized(request);
+
+  if (!authorized) {
     return Response.json({ authorized: false, suggestions: [], voteThreshold: VOTE_THRESHOLD });
   }
 
   const suggestions = await getSuggestions();
+  
+  // Set cookie if authorized via URL param
+  const url = new URL(request.url);
+  if (url.searchParams.get("pin") === ADMIN_PIN) {
+    return Response.json(
+      { authorized: true, suggestions, voteThreshold: VOTE_THRESHOLD },
+      { headers: { "Set-Cookie": await adminSession.serialize(ADMIN_PIN) } }
+    );
+  }
+  
   return Response.json({ authorized: true, suggestions, voteThreshold: VOTE_THRESHOLD });
 }
 
@@ -27,13 +60,28 @@ export async function action({ request }: Route.ActionArgs) {
   const suggestionId = formData.get("suggestionId") as string;
   const actionType = formData.get("action") as string;
 
-  if (pin !== ADMIN_PIN) {
+  // For login action
+  if (actionType === "login") {
+    if (pin === ADMIN_PIN) {
+      const suggestions = await getSuggestions();
+      return Response.json(
+        { authorized: true, suggestions, voteThreshold: VOTE_THRESHOLD },
+        { headers: { "Set-Cookie": await adminSession.serialize(ADMIN_PIN) } }
+      );
+    }
+    return Response.json({ authorized: false, error: "Invalid PIN" }, { status: 401 });
+  }
+
+  // For other actions, check authorization via cookie
+  const authorized = await isAuthorized(request);
+  if (!authorized) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   if (actionType === "delete" && suggestionId) {
     await deleteSuggestion(suggestionId);
-    return Response.json({ success: true, deleted: suggestionId });
+    const suggestions = await getSuggestions();
+    return Response.json({ success: true, deleted: suggestionId, suggestions });
   }
 
   return Response.json({ error: "Invalid action" }, { status: 400 });
@@ -57,18 +105,40 @@ interface LoaderData {
 
 export default function Admin({ loaderData }: Route.ComponentProps) {
   const data = loaderData as unknown as LoaderData;
+  const [searchParams] = useSearchParams();
   const [pin, setPin] = useState("");
   const [authorized, setAuthorized] = useState(data.authorized);
   const [suggestions, setSuggestions] = useState<Suggestion[]>(data.suggestions);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Update state when loaderData changes (e.g., after URL param login)
+  useEffect(() => {
+    setAuthorized(data.authorized);
+    setSuggestions(data.suggestions);
+  }, [data.authorized, data.suggestions]);
 
   async function handleLogin(e: React.FormEvent) {
-    const res = await fetch(`/admin?pin=${encodeURIComponent(pin)}`);
-    const data = await res.json();
-    if (data.authorized) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append("pin", pin);
+    formData.append("action", "login");
+
+    const res = await fetch("/admin", {
+      method: "POST",
+      body: formData,
+    });
+
+    const result = await res.json();
+    setLoading(false);
+
+    if (result.authorized) {
       setAuthorized(true);
-      setSuggestions(data.suggestions);
-      setError(null);
+      setSuggestions(result.suggestions);
+      setPin(""); // Clear PIN from state
     } else {
       setError("Invalid PIN");
     }
@@ -78,7 +148,6 @@ export default function Admin({ loaderData }: Route.ComponentProps) {
     if (!confirm("Are you sure you want to delete this suggestion?")) return;
 
     const formData = new FormData();
-    formData.append("pin", pin);
     formData.append("suggestionId", suggestionId);
     formData.append("action", "delete");
 
@@ -87,9 +156,12 @@ export default function Admin({ loaderData }: Route.ComponentProps) {
       body: formData,
     });
 
-    const data = await res.json();
-    if (data.success) {
-      setSuggestions((prev) => prev.filter((s) => s.id !== suggestionId));
+    const result = await res.json();
+    if (result.success) {
+      setSuggestions(result.suggestions);
+    } else if (result.error === "Unauthorized") {
+      setAuthorized(false);
+      setError("Session expired. Please log in again.");
     }
   }
 
@@ -98,22 +170,24 @@ export default function Admin({ loaderData }: Route.ComponentProps) {
       <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
         <div className="bg-gray-800 p-8 rounded-xl max-w-md w-full">
           <h1 className="text-2xl font-bold mb-6 text-center">Admin Login</h1>
-          <Form onSubmit={handleLogin}>
+          <form onSubmit={handleLogin}>
             <input
               type="password"
               value={pin}
               onChange={(e) => setPin(e.target.value)}
               placeholder="Enter PIN"
               className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-500 mb-4"
+              autoFocus
             />
             {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
             <button
               type="submit"
-              className="w-full py-3 bg-purple-600 hover:bg-purple-700 rounded-lg font-medium transition"
+              disabled={loading || !pin}
+              className="w-full py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-800 disabled:cursor-not-allowed rounded-lg font-medium transition"
             >
-              Login
+              {loading ? "Logging in..." : "Login"}
             </button>
-          </Form>
+          </form>
         </div>
       </div>
     );
